@@ -583,7 +583,6 @@ class Brain(object):
         mlab.view(*view)
         self._f.scene.disable_render = False
 
-
     def add_morphometry(self, measure, grayscale=False):
         """Add a morphometry overlay to the image.
 
@@ -976,8 +975,8 @@ class Brain(object):
         mlab.draw(self._f)
         mlab.savefig(fname)
 
-    def save_imageset(self, prefix, views, filetype='png'):
-        """Convience wrapper for save_image
+    def save_imageset(self, prefix, views,  filetype='png', colorbar='auto'):
+        """Convenience wrapper for save_image
 
         Files created are prefix+'_$view'+filetype
 
@@ -989,6 +988,10 @@ class Brain(object):
             desired views for images
         filetype: string
             image type
+        colorbar: None | 'auto' | [int], optional
+            if None no colorbar is visible. If 'auto' is given the colorbar
+            is only shown in the middle view. Otherwise on the listed
+            views when a list of int is passed.
 
         Returns
         -------
@@ -998,12 +1001,19 @@ class Brain(object):
         if isinstance(views, basestring):
             raise ValueError("Views must be a non-string sequence"
                              "Use show_view & save_image for a single view")
+        if colorbar == 'auto':
+            colorbar = [len(views) // 2]
         images_written = []
-        for view in views:
+        for iview, view in enumerate(views):
             try:
                 fname = "%s_%s.%s" % (prefix, view, filetype)
                 images_written.append(fname)
+                if colorbar is not None and iview in colorbar:
+                    self.show_colorbar()
+                else:
+                    self.hide_colorbar()
                 self.show_view(view)
+
                 try:
                     self.save_image(fname)
                 except ValueError:
@@ -1119,7 +1129,7 @@ class Brain(object):
         self.data["transparent"] = transparent
 
     def save_montage(self, filename, order=['lat', 'ven', 'med'],
-                     orientation='h', border_size=15):
+                     orientation='h', border_size=15, colorbar='auto'):
         """Create a montage from a given order of images
 
         Parameters
@@ -1132,18 +1142,38 @@ class Brain(object):
             montage image orientation (horizontal of vertical alignment)
         border_size: int
             Size of image border (more or less space between images)
+        colorbar: None | 'auto' | [int], optional
+            if None no colorbar is visible. If 'auto' is given the colorbar
+            is only shown in the middle view. Otherwise on the listed
+            views when a list of int is passed.
         """
         assert orientation in ['h', 'v']
         import Image
-        fnames = self.save_imageset("tmp", order)
+        if colorbar == 'auto':
+            colorbar = [len(order) // 2]
+        fnames = self.save_imageset("tmp", order, colorbar=colorbar)
         images = map(Image.open, fnames)
         # get bounding box for cropping
         boxes = []
-        for im in images:
-            red = np.array(im)[:, :, 0]
-            red[red == red[0, 0]] = 0  # hack for find_objects that wants 0
-            labels, n_labels = ndimage.label(red)
-            s = ndimage.find_objects(labels, n_labels)[0]  # slice roi
+        for ix, im in enumerate(images):
+            # sum the RGB dimension so we do not miss G or B-only pieces
+            gray = np.sum(np.array(im), axis=-1)
+            gray[gray == gray[0, 0]] = 0  # hack for find_objects that wants 0
+            labels, n_labels = ndimage.label(gray.astype(np.float))
+            slices = ndimage.find_objects(labels, n_labels)  # slice roi
+            if colorbar is not None and ix in colorbar:
+                # we need all pieces so let's compose them into single min/max
+                slices_a = np.array([[[xy.start, xy.stop] for xy in s]
+                                     for s in slices])
+                # TODO: ideally gaps could be deduced and cut out with
+                #       consideration of border_size
+                # so we need mins on 0th and maxs on 1th of 1-nd dimension
+                mins = np.min(slices_a[:, :, 0], axis=0)
+                maxs = np.max(slices_a[:, :, 1], axis=0)
+                s = (slice(mins[0], maxs[0]), slice(mins[1], maxs[1]))
+            else:
+                # we need just the first piece
+                s = slices[0]
             # box = (left, top, width, height)
             boxes.append([s[1].start - border_size, s[0].start - border_size,
                           s[1].stop + border_size, s[0].stop + border_size])
@@ -1377,6 +1407,26 @@ class Brain(object):
             return self.viewdict[view]
         else:
             return view
+
+    def _colorbar_visibility(self, visible):
+        if hasattr(self, 'data') and 'colorbar' in self.data:
+            self.data['colorbar'].visible = visible
+        if hasattr(self, 'morphometry') and 'colorbar' in self.morphometry:
+            self.morphometry['colorbar'].visible = visible
+        if hasattr(self, 'contour') and 'colorbar' in self.contour:
+            self.contour['colorbar'].visible = visible
+        if hasattr(self, 'overlays'):
+            for overlay in self.overlays:
+                if 'colorbar' in overlay:
+                    overlay['colorbar'] = visible
+
+    def show_colorbar(self):
+        "Show colorbar(s)"
+        self._colorbar_visibility(True)
+
+    def hide_colorbar(self):
+        "Hide colorbar(s)"
+        self._colorbar_visibility(False)
 
     def close(self):
         """Close the figure and cleanup data structure."""
